@@ -1,0 +1,177 @@
+
+# app/main.py
+#-----
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List
+import requests
+from SPARQLWrapper import SPARQLWrapper, JSON
+import pandas as pd
+import os
+
+app = FastAPI()
+
+# Models
+class Entity(BaseModel):
+    name: str
+    type: str
+
+class Relation(BaseModel):
+    source: str
+    target: str
+    type: str
+
+class AggregatedData(BaseModel):
+    entities: List[Entity]
+    relations: List[Relation]
+
+# 1. Extraction depuis data.gouv.fr
+@app.get("/data-gouv")
+async def fetch_data_gouv(query: str = "education"):
+    url = f"https://www.data.gouv.fr/api/1/datasets/?q={query}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        datasets = response.json().get("data", [])
+        results = [
+            {
+                "title": dataset.get("title"),
+                "description": dataset.get("description", "No description available"),
+                "last_update": dataset.get("last_update"),
+                "url": dataset.get("page")
+            }
+            for dataset in datasets
+        ]
+        return {"results": results}
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching data: {str(e)}")
+
+# 2. Extraction depuis DBpedia
+@app.get("/dbpedia")
+async def fetch_dbpedia(entity: str = "Paris"):
+    sparql = SPARQLWrapper("https://dbpedia.org/sparql")
+    query = f"""
+    SELECT ?property ?value
+    WHERE {{
+        dbr:{entity} ?property ?value
+    }}
+    LIMIT 20
+    """
+    try:
+        sparql.setQuery(query)
+        sparql.setReturnFormat(JSON)
+        results = sparql.query().convert()
+        data = [
+            {
+                "property": res["property"]["value"],
+                "value": res["value"]["value"]
+            }
+            for res in results["results"]["bindings"]
+        ]
+        return {
+            "entity": entity,
+            "description": f"Information about {entity} from DBpedia",
+            "data": data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error querying DBpedia: {str(e)}")
+
+# 3. Extraction depuis un fichier Kaggle
+@app.get("/kaggle-ner")
+async def fetch_kaggle_data():
+    kaggle_file = "ner_dataset.csv"
+    if not os.path.exists(kaggle_file):
+        raise HTTPException(status_code=404, detail="Kaggle dataset file not found")
+    try:
+        df = pd.read_csv(kaggle_file)
+        df_cleaned = df.dropna(subset=["Word", "Tag"]).head(100)
+        results = [
+            {
+                "word": row["Word"],
+                "pos": row["POS"],
+                "ner_tag": row["Tag"]
+            }
+            for _, row in df_cleaned.iterrows()
+        ]
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing Kaggle data: {str(e)}")
+
+# 4. Agrégation et nettoyage
+@app.post("/aggregate")
+async def aggregate_data(data_sources: List[AggregatedData]):
+    all_entities = []
+    all_relations = []
+
+    for source in data_sources:
+        all_entities.extend(source.entities)
+        all_relations.extend(source.relations)
+
+    unique_entities = {e.name: e for e in all_entities}.values()
+    unique_relations = {(r.source, r.target, r.type): r for r in all_relations}.values()
+
+    return {
+        "aggregated_entities": list(unique_entities),
+        "aggregated_relations": list(unique_relations)
+    }
+
+#-----
+
+# tests/test_main.py
+#-----
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+def test_root():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "message" in response.json()
+
+def test_data_gouv():
+    response = client.get("/data-gouv?query=education")
+    assert response.status_code == 200
+    assert "results" in response.json()
+    assert isinstance(response.json()["results"], list)
+
+def test_dbpedia():
+    response = client.get("/dbpedia?entity=Paris")
+    assert response.status_code == 200
+    assert "entity" in response.json()
+    assert "description" in response.json()
+    assert "data" in response.json()
+
+def test_kaggle_ner(monkeypatch):
+    import pandas as pd
+    def mock_read_csv(*args, **kwargs):
+        return pd.DataFrame({
+            "Word": ["Paris", "Eiffel"],
+            "POS": ["NNP", "NNP"],
+            "Tag": ["B-LOC", "I-LOC"]
+        })
+    monkeypatch.setattr(pd, "read_csv", mock_read_csv)
+    response = client.get("/kaggle-ner")
+    assert response.status_code == 200
+    assert "results" in response.json()
+
+def test_aggregate():
+    payload = [
+        {
+            "entities": [{"name": "Paris", "type": "Location"}],
+            "relations": [{"source": "Paris", "target": "Eiffel Tower", "type": "LocatedIn"}]
+        },
+        {
+            "entities": [{"name": "Eiffel Tower", "type": "Landmark"}],
+            "relations": [{"source": "Paris", "target": "Eiffel Tower", "type": "LocatedIn"}]
+        }
+    ]
+    response = client.post("/aggregate", json=payload)
+    assert response.status_code == 200
+    result = response.json()
+    assert "aggregated_entities" in result
+    assert "aggregated_relations" in result
+    assert len(result["aggregated_entities"]) == 2
+    assert len(result["aggregated_relations"]) == 1
+
+#-----

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pandas
+requests
+httpx
+SPARQLWrapper
+kaggle
+pytest
+pytest-mock
+black
+pylint
+mkdocs
+mkdocs-material
+hvac
