@@ -28,12 +28,3 @@ pip install -r requirements.txt
 2. Mettre en place votre flux de travail
 3. Exécuter l'outil
 4. Traiter les données collectées
-
-## Configuration
-Modifiez le fichier `config.yml` pour personnaliser vos paramètres d'extraction.
-
-## Licence
-Licence MIT
-
-## Contribution
-Les contributions sont les bienvenues. Veuillez ouvrir une issue ou soumettre une pull request.
